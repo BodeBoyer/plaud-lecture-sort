@@ -37,9 +37,11 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # ---------- plaud ----------
 def plaud(*args: str) -> str:
     """Run plaud CLI, return stdout ('' on failure). Exit code 2 = not logged in."""
+    import shutil
+    exe = shutil.which("plaud")  # .cmd shim on Windows, so resolve instead of shell=True
     try:
-        p = subprocess.run(["plaud", *args], capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", shell=True)
+        p = subprocess.run([exe or "plaud", *args], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
     except FileNotFoundError:
         sys.exit("`plaud` not found: npm install -g @plaud-ai/cli, then `plaud login`")
     if p.returncode == 2:
@@ -139,11 +141,13 @@ def google_services():
                 sys.exit(f"missing {cred}: download OAuth desktop client JSON from Google Cloud")
             creds = InstalledAppFlow.from_client_secrets_file(cred, SCOPES).run_local_server(port=0)
         tok.write_text(creds.to_json())
+        os.chmod(tok, 0o600)
     return build("drive", "v3", credentials=creds), build("docs", "v1", credentials=creds)
 
 
 def drive_find_or_create(drive, name: str, mime: str, parent: str | None) -> tuple[str, bool]:
-    q = f"name = '{name}' and mimeType = '{mime}' and trashed = false"
+    safe = name.replace("\\", "\\\\").replace("'", "\\'")  # Drive query string escaping
+    q = f"name = '{safe}' and mimeType = '{mime}' and trashed = false"
     if parent:
         q += f" and '{parent}' in parents"
     hits = drive.files().list(q=q, fields="files(id)").execute().get("files", [])
@@ -315,9 +319,9 @@ def cmd_setup(_args) -> int:
     if sys.platform != "win32":
         print("  [--] task scheduler: Windows only; run tray.py at login via launchd/cron")
         return 0 if ok else 1
-    pyw = Path(sys.executable).with_name("pythonw.exe")
-    tray = HERE / "tray.py"
-    ps = (f"$a = New-ScheduledTaskAction -Execute '{pyw}' -Argument '\"{tray}\"' -WorkingDirectory '{HERE}';"
+    q = lambda v: str(v).replace("'", "''")  # noqa: E731  PowerShell single-quote escape
+    pyw, tray, here = q(Path(sys.executable).with_name("pythonw.exe")), q(HERE / "tray.py"), q(HERE)
+    ps = (f"$a = New-ScheduledTaskAction -Execute '{pyw}' -Argument ('\"' + '{tray}' + '\"') -WorkingDirectory '{here}';"
           f"$t = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME;"
           f"$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
           f"-ExecutionTimeLimit (New-TimeSpan -Days 3650) -MultipleInstances IgnoreNew;"
