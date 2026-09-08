@@ -39,7 +39,7 @@ Requirements: Python 3.11+, Node 20+, a Plaud account, Windows (tray + scheduler
 the core script runs anywhere).
 
 ```bash
-git clone https://github.com/<you>/plaud-lecture-sort
+git clone https://github.com/BodeBoyer/plaud-lecture-sort
 cd plaud-lecture-sort
 pip install -r requirements.txt
 npm install -g @plaud-ai/cli
