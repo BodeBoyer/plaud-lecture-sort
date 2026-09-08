@@ -171,11 +171,55 @@ def monthly_doc(drive, cfg: dict, state: dict, cls: str, month: str) -> str:
                                            "application/vnd.google-apps.document", sub)
     if created:
         url = f"https://docs.google.com/document/d/{doc_id}/edit"
-        with NEW_DOCS.open("a", encoding="utf-8") as f:
-            f.write(f"{dt.date.today()}  {cname} - {month}  ADD TO NOTEBOOKLM: {url}\n")
-        print(f"  NEW DOC -> add to NotebookLM: {url}")
+        nb = cfg["classes"].get(cls, {}).get("notebook_id")
+        if nb and notebooklm_add(nb, doc_id, f"{cname} - {month}"):
+            print(f"  NEW DOC added to NotebookLM: {url}")
+        else:
+            with NEW_DOCS.open("a", encoding="utf-8") as f:
+                f.write(f"{dt.date.today()}  {cname} - {month}  ADD TO NOTEBOOKLM: {url}\n")
+            print(f"  NEW DOC -> add to NotebookLM: {url}")
     state["docs"][key] = doc_id
     return doc_id
+
+
+# ---------- notebooklm (optional, unofficial notebooklm-py) ----------
+def notebooklm_add(notebook_id: str, doc_id: str, title: str) -> bool:
+    """Attach a Drive Doc to a NotebookLM notebook. False on any failure; the
+    caller then falls back to NEW_DOCS.txt so a broken library never blocks."""
+    try:
+        import asyncio
+        from notebooklm import NotebookLMClient
+
+        async def go():
+            async with NotebookLMClient.from_storage() as c:
+                await c.sources.add_drive(notebook_id, doc_id, title)
+        asyncio.run(go())
+        return True
+    except Exception as e:  # noqa: BLE001  ImportError, auth expired, RPC change
+        print(f"  notebooklm add failed ({type(e).__name__}: {str(e)[:120]})")
+        return False
+
+
+def cmd_notebooks(_args) -> int:
+    """Create one NotebookLM notebook per class (if missing), save ids to classes.json."""
+    import asyncio
+    from notebooklm import NotebookLMClient
+    cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
+
+    async def go():
+        async with NotebookLMClient.from_storage() as c:
+            have = {n.title: n.id for n in await c.notebooks.list()}
+            for key, cls in cfg["classes"].items():
+                if cls.get("notebook_id"):
+                    print(f"  {key}: {cls['notebook_id']} (kept)")
+                    continue
+                found = cls["name"] in have
+                cls["notebook_id"] = have[cls["name"]] if found else (await c.notebooks.create(cls["name"])).id
+                print(f"  {key}: {cls['notebook_id']} ({'found' if found else 'created'})")
+    asyncio.run(go())
+    CONFIG.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    print(f"notebook ids saved to {CONFIG.name}")
+    return 0
 
 
 def docs_append(docs, doc_id: str, text: str) -> None:
@@ -316,6 +360,13 @@ def cmd_setup(_args) -> int:
         check("pystray + pillow", True)
     except ImportError:
         check("pystray + pillow", False, "pip install pystray pillow")
+    try:
+        from notebooklm.paths import get_storage_path
+        nb_ok = Path(get_storage_path()).exists()
+        print(f"  [{'OK' if nb_ok else '--'}] NotebookLM login (optional, auto-adds docs)"
+              + ("" if nb_ok else "  ->  notebooklm login --browser chrome, then: python lecture_sort.py notebooks"))
+    except ImportError:
+        print("  [--] notebooklm-py not installed: NEW_DOCS.txt lists docs to add by hand")
     if sys.platform != "win32":
         print("  [--] task scheduler: Windows only; run tray.py at login via launchd/cron")
         return 0 if ok else 1
@@ -350,7 +401,7 @@ _T = {
 
 def cmd_self_test(_args) -> int:
     import tempfile
-    global NOTES, LOG, STATE
+    global NOTES, LOG, STATE, NEW_DOCS, notebooklm_add
     recs = parse_recent(_FIXTURE)
     assert [r["id"][:4] for r in recs] == ["1ae0", "22fd", "e729", "a148"], recs
     assert recs[0]["name"] == "2026-07-19 21:45:03" and recs[2]["duration"] == "1h21m"
@@ -368,6 +419,7 @@ def cmd_self_test(_args) -> int:
 
     with tempfile.TemporaryDirectory() as d:
         NOTES, LOG, STATE = Path(d) / "notes", Path(d) / "log", Path(d) / "state.json"
+        NEW_DOCS = Path(d) / "new_docs.txt"
         state = {"seen": {}, "docs": {}}
         sunk = []
         sink = lambda c, m, t: sunk.append((c, m)) or f"doc-{c}"  # noqa: E731
@@ -386,6 +438,21 @@ def cmd_self_test(_args) -> int:
         # rerun: nothing re-sunk, pending one retried and still pending
         assert [c for _, c, _ in run_()] == ["pending"] and len(sunk) == 2
         assert entry_text(recs[1], "", "x").count("(none)") == 1
+
+        # NotebookLM auto-add: success skips NEW_DOCS, failure falls back to it
+        class FakeDrive:
+            def files(self): return self
+            def list(self, **k): self.r = {"files": []}; return self
+            def create(self, **k): self.r = {"id": "newdoc"}; return self
+            def execute(self): return self.r
+        cfg["classes"]["math381"]["notebook_id"] = "nb1"
+        calls = []
+        notebooklm_add = lambda nb, doc, title: calls.append((nb, doc, title)) or True  # noqa: E731
+        assert monthly_doc(FakeDrive(), cfg, {"seen": {}, "docs": {}}, "math381", "2026-10") == "newdoc"
+        assert calls == [("nb1", "newdoc", "MATH 381 Discrete Math - 2026-10")] and not NEW_DOCS.exists()
+        notebooklm_add = lambda *a: False  # noqa: E731
+        monthly_doc(FakeDrive(), cfg, {"seen": {}, "docs": {}}, "math381", "2026-10")
+        assert "ADD TO NOTEBOOKLM" in NEW_DOCS.read_text(encoding="utf-8")
     print("self-test passed")
     return 0
 
@@ -400,6 +467,7 @@ def main(argv=None) -> int:
     sub.add_parser("self-test").set_defaults(func=cmd_self_test)
     sub.add_parser("setup", help="check prerequisites, register logon task").set_defaults(func=cmd_setup)
     sub.add_parser("status").set_defaults(func=cmd_status)
+    sub.add_parser("notebooks", help="create a NotebookLM notebook per class, save ids").set_defaults(func=cmd_notebooks)
     args = ap.parse_args(argv)
     return args.func(args)
 

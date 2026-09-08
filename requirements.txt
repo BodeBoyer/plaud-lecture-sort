@@ -3,3 +3,4 @@ google-api-python-client>=2.100
 google-auth-oauthlib>=1.0
 pystray>=0.19
 pillow>=10
+notebooklm-py>=0.8   # optional: auto-add Docs to NotebookLM

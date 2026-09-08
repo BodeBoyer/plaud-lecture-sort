@@ -69,9 +69,25 @@ markdown folder only.
 
 ### NotebookLM
 
-One notebook per class. The first lecture of each month creates a new Doc and
-appends its link to `NEW_DOCS.txt` (tray menu: "New docs to add to NotebookLM").
-Open the notebook, Add source, Google Drive, pick that Doc. Done for the month.
+Manual (default): one notebook per class. The first lecture of each month creates
+a new Doc and appends its link to `NEW_DOCS.txt` (tray menu: "New docs to add to
+NotebookLM"). Open the notebook, Add source, Google Drive, pick that Doc. Done for
+the month.
+
+Automatic (optional, zero clicks): NotebookLM has no public API, so this uses the
+unofficial [notebooklm-py](https://github.com/teng-lin/notebooklm-py) library.
+
+```bash
+pip install "notebooklm-py[browser]"
+notebooklm login --browser chrome      # Google sign-in in a Chrome window, once
+python lecture_sort.py notebooks       # creates one notebook per class, saves ids
+```
+
+After that every new monthly Doc is attached to the right notebook by the sorter
+itself. If the library ever breaks (Google changes internals, session expires),
+the sorter falls back to `NEW_DOCS.txt` and keeps working. Re-run
+`notebooklm login` to fix. Your Google session is stored under `~/.notebooklm/`,
+never in this folder.
 
 ## Commands
 
@@ -81,6 +97,7 @@ Open the notebook, Add source, Google Drive, pick that Doc. Done for the month.
 | `python lecture_sort.py run --dry-run` | show classification, write nothing to Docs |
 | `python lecture_sort.py status` | last run, counts per class |
 | `python lecture_sort.py setup` | prerequisite checklist + register logon task |
+| `python lecture_sort.py notebooks` | create NotebookLM notebook per class, save ids |
 | `python lecture_sort.py self-test` | offline tests |
 | `pythonw tray.py` | tray app (setup registers this at logon) |
 
