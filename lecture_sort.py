@@ -30,7 +30,7 @@ SCOPES = ["https://www.googleapis.com/auth/documents",
           "https://www.googleapis.com/auth/drive.file"]
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
-_ID_RE = re.compile(r"^[0-9a-f]{32}$", re.I)
+_ID_RE = re.compile(r"^(of_)?[0-9a-f]{32}$", re.I)  # Plaud added the of_ prefix Sept 2026
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -134,9 +134,14 @@ def google_services():
     tok, cred = HERE / "token.json", HERE / "credentials.json"
     creds = Credentials.from_authorized_user_file(tok, SCOPES) if tok.exists() else None
     if not creds or not creds.valid:
+        refreshed = False
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+                refreshed = True
+            except Exception as e:  # noqa: BLE001  invalid_grant: expired (Testing-mode app) or revoked
+                print(f"  google token refresh failed ({str(e)[:80]}); redoing consent")
+        if not refreshed:
             if not cred.exists():
                 sys.exit(f"missing {cred}: download OAuth desktop client JSON from Google Cloud")
             creds = InstalledAppFlow.from_client_secrets_file(cred, SCOPES).run_local_server(port=0)
@@ -267,11 +272,12 @@ def run(days: int, dry_run: bool, cfg: dict, state: dict, *, recent_text=None,
             return doc_id
     results = []
     for r in recs:
-        rid = r["id"]
-        if rid in state["seen"]:
+        rid = r["id"]                       # raw id, what the CLI wants
+        key = rid.removeprefix("of_")       # state/file key, stable across the prefix change
+        if key in state["seen"]:
             continue
         if duration_minutes(r["duration"]) < cfg["min_minutes"]:
-            state["seen"][rid] = {"class": "short", "at": dt.datetime.now().isoformat(timespec="seconds")}
+            state["seen"][key] = {"class": "short", "at": dt.datetime.now().isoformat(timespec="seconds")}
             results.append((rid, "short", ""))
             continue
         transcript = (fetch("transcript", rid) or "").strip()
@@ -282,7 +288,7 @@ def run(days: int, dry_run: bool, cfg: dict, state: dict, *, recent_text=None,
         cls, how, scores = classify(transcript, cfg, llm)
         month = r["created_at"][:7]
         text = entry_text(r, summary, transcript)
-        local = NOTES / cls / f"{r['created_at']}_{rid}.md"
+        local = NOTES / cls / f"{r['created_at']}_{key}.md"
         local.parent.mkdir(parents=True, exist_ok=True)
         local.write_text(text.lstrip(), encoding="utf-8")
         line = f"{rid} {r['created_at']} {r['name'][:40]!r} -> {cls} ({how}, {scores})"
@@ -291,7 +297,7 @@ def run(days: int, dry_run: bool, cfg: dict, state: dict, *, recent_text=None,
             results.append((rid, cls, how))
             continue
         doc_id = sink(cls, month, text)
-        state["seen"][rid] = {"class": cls, "how": how, "doc": doc_id,
+        state["seen"][key] = {"class": cls, "how": how, "doc": doc_id,
                               "at": dt.datetime.now().isoformat(timespec="seconds")}
         save_state(state)
         with LOG.open("a", encoding="utf-8") as f:
@@ -389,6 +395,7 @@ _FIXTURE = """Recordings in the last 7 days: 4
 22fdc01d9165120576f91a97decb7202  Math lecture  2026-09-01  52m
 e729230fc30670de7c2ec69c2fb8cf05  Steve Jobs & Bill Gates: A Conversation That Shaped Technology  2026-09-02  1h21m
 a1487d9b1b31bac9fde725a524fff5a0  Untitled  2026-09-02  48m
+of_69c78e38fd3259d662d8ac483c7c81a8  09-11 Lecture: Set Theory  2026-09-11  48m21s
 """
 _T = {
     "22fdc01d9165120576f91a97decb7202": "Today we prove by induction that the theorem holds for every integer. "
@@ -403,7 +410,7 @@ def cmd_self_test(_args) -> int:
     import tempfile
     global NOTES, LOG, STATE, NEW_DOCS, notebooklm_add
     recs = parse_recent(_FIXTURE)
-    assert [r["id"][:4] for r in recs] == ["1ae0", "22fd", "e729", "a148"], recs
+    assert [r["id"][:4] for r in recs] == ["1ae0", "22fd", "e729", "a148", "of_6"], recs
     assert recs[0]["name"] == "2026-07-19 21:45:03" and recs[2]["duration"] == "1h21m"
     assert abs(duration_minutes("1h21m") - 81) < 1e-9 and duration_minutes("8s") < 1
 
@@ -420,7 +427,7 @@ def cmd_self_test(_args) -> int:
     with tempfile.TemporaryDirectory() as d:
         NOTES, LOG, STATE = Path(d) / "notes", Path(d) / "log", Path(d) / "state.json"
         NEW_DOCS = Path(d) / "new_docs.txt"
-        state = {"seen": {}, "docs": {}}
+        state = {"seen": {"69c78e38fd3259d662d8ac483c7c81a8": {"class": "math381"}}, "docs": {}}  # pre-prefix key
         sunk = []
         sink = lambda c, m, t: sunk.append((c, m)) or f"doc-{c}"  # noqa: E731
         fetch = lambda kind, rid: _T.get(rid, "") if kind == "transcript" else "SUM"  # noqa: E731
@@ -431,6 +438,7 @@ def cmd_self_test(_args) -> int:
         assert res["22fdc01d9165120576f91a97decb7202"] == "math381"
         assert res["e729230fc30670de7c2ec69c2fb8cf05"] == "finance"
         assert res["a1487d9b1b31bac9fde725a524fff5a0"] == "pending"
+        assert "of_69c78e38fd3259d662d8ac483c7c81a8" not in res, "old-style state key must dedup of_ id"
         assert sunk == [("math381", "2026-09"), ("finance", "2026-09")], sunk
         assert state["seen"]["22fdc01d9165120576f91a97decb7202"]["doc"] == "doc-math381"
         md = (NOTES / "math381" / "2026-09-01_22fdc01d9165120576f91a97decb7202.md").read_text(encoding="utf-8")
